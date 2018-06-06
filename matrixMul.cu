@@ -26,6 +26,14 @@
 using namespace std;
 using namespace tmm;
 
+//func declarations
+__global__ void tmm_kernel(Parameter para, tmm_int a_seg, tmm_int b_seg, tmm_int k, half *gpuHalfp, half *gpuHalfq, half *gpuR);
+void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float **Rp);
+tmm_problem read_problem(string path);
+void tmm_destroy_model(tmm_model **model);
+tmm_model* tmm_load_model(char const *path);
+tmm_float look_up_Rp(float **Rp, tmm_int u, tmm_int v, tmm_model *model);
+tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, float **Rp);
 
 
 //------------------------------------------------------------Kernel Functions-----------------------------------------------
@@ -91,8 +99,8 @@ void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float 
 			printf("load a R partition and update\n");
 	        long long idx = 0;
 	        int partNum = 2 * rowTile + colTile;
-	        for (int i = 0; i < model->gridSizeM; i++){
-		        for (int j = 0; j < model->gridSizeN; j++){
+	        for (long long i = 0; i < model->gridSizeM; i++){
+		        for (long long j = 0; j < model->gridSizeN; j++){
 			        Rp[partNum][idx] = (float)(shortR[idx]);
 			        idx++;
 		        }

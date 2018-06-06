@@ -58,8 +58,8 @@ namespace tmm
 		tmm_int n;
 		tmm_int k;
 		tmm_float b;
-		tmm_int gridSizeM;
-		tmm_int gridSizeN;
+		long long gridSizeM;
+		long long gridSizeN;
         short *halfp;
         short *halfq;
 		short *P;
@@ -73,6 +73,8 @@ namespace tmm
 		tmm_int m;
 		tmm_int n;
 		tmm_long nnz;
+		long long gridSizeM;
+		long long gridSizeN;
 		struct tmm_node *R;	
 		half *gpuR;
 	};
