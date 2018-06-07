@@ -32,9 +32,10 @@ void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float 
 tmm_problem read_problem(string path);
 void tmm_destroy_model(tmm_model **model);
 tmm_model* tmm_load_model(char const *path);
+void init_feature(short *feature_vec, int grid, long long seg, int k);
+void init_model(tmm_model*model, tmm_problem*prob, Parameter para);
 tmm_float look_up_Rp(float **Rp, tmm_int u, tmm_int v, tmm_model *model);
 tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, float **Rp);
-
 
 //------------------------------------------------------------Kernel Functions-----------------------------------------------
 
@@ -84,8 +85,8 @@ void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float 
 			assert(p_tmp);
 			assert(q_tmp); 
 			// Copy from CPU to GMEM
-			cudaMemcpy(&model->gpuHalfp, p_tmp, sizeof(half)*model->gridSizeM*model->k, cudaMemcpyHostToDevice);
-            cudaMemcpy(&model->gpuHalfq, q_tmp, sizeof(half)*model->gridSizeN*model->k, cudaMemcpyHostToDevice);
+			cudaMemcpy(model->gpuHalfp, p_tmp, sizeof(half)*model->gridSizeM*model->k, cudaMemcpyHostToDevice);
+            cudaMemcpy(model->gpuHalfq, q_tmp, sizeof(half)*model->gridSizeN*model->k, cudaMemcpyHostToDevice);
 			
 			// Dim Configuration
             dim3 block(32, 32);
@@ -250,6 +251,34 @@ tmm_model* tmm_load_model(char const *path)  // load feature matrix P, Q
 
 	return model;
 }
+//-----------------------------------------------------------------
+void init_model(tmm_model*model, tmm_problem*prob, Parameter para)
+{
+
+    printf("init model ...\n");
+    clock_t start = clock();
+
+    //mf_model *model = new mf_model;
+    //model->fun = 0;
+    model->gridSizeM = model->m/para.rowScale + 1;
+    model->gridSizeN = model->n/para.colScale + 1;
+
+    //allocate memory
+    cudaMallocHost(&model->floatp, sizeof(float)*model->ux*model->u_seg*k);
+    cudaMallocHost(&model->floatq, sizeof(float)*model->vy*model->v_seg*k);
+
+    cudaMallocHost(&model->halfp, sizeof(short)*model->ux*model->u_seg*k);
+    cudaMallocHost(&model->halfq, sizeof(short)*model->vy*model->v_seg*k);
+
+    gpuErr(cudaPeekAtLastError());
+
+    //random init
+    init_feature(model->halfp, model->ux, model->u_seg, model->k);
+    init_feature(model->halfq, model->vy, model->v_seg, model->k);
+
+    printf("time elapsed:%.8lfs\n",(clock() - start)/(double)CLOCKS_PER_SEC);
+    printf("\n\n\n");
+}
 
 //-----------------------------------------------------------------
 tmm_float look_up_Rp(float **Rp, tmm_int u, tmm_int v, tmm_model *model)
@@ -291,8 +320,6 @@ void multiplication(string test_path, const char* model_path)
     if(model == nullptr)
         throw runtime_error("cannot load model from " + string(model_path));
     Parameter para;
-    model->gridSizeM = model->m/para.rowScale + 1;
-	model->gridSizeN = model->n/para.colScale + 1;
     //core
     float **Rp;
 	//Rp = malloc(sizeof(float)*para.rowScale*para.colScale*model->gridSizeM*model->gridSizeN);

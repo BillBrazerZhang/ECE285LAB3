@@ -57,7 +57,7 @@ namespace tmm
 		tmm_int m;
 		tmm_int n;
 		tmm_int k;
-		tmm_float b;
+		//tmm_float b;
 		long long gridSizeM;
 		long long gridSizeN;
         short *halfp;
