@@ -41,7 +41,7 @@ namespace tmm
     int tile;
 	int rowScale;
 	int colScale;
-    Parameter():tile(32), rowScale(4), colScale(2){}
+    Parameter():tile(32), rowScale(10), colScale(1){}
     };
 
 	struct tmm_node
@@ -77,7 +77,7 @@ namespace tmm
 		long long gridSizeN;
         short *halfR;
         float *floatR;
-		// struct tmm_node *R;	
+		struct tmm_node *R;	
 		// struct mf_node **R2D;
         // long long *gridSize;
         // long long maxGridSize;

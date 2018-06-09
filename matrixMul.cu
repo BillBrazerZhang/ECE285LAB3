@@ -42,15 +42,15 @@ using namespace tmm;
 //func declarations
 __global__ void tmm_kernel(Parameter para, tmm_int a_seg, tmm_int b_seg, tmm_int k, half *gpuHalfp, half *gpuHalfq, half *gpuR);
 __global__ void transform_half(half *gpu_half_feature, float *gpu_float_feature, long long vec_size);
-void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float **Rp);
+void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob);
 tmm_problem read_problem(string path);
 void grid_problem(tmm_problem* prob, Parameter para);
 tmm_model* tmm_load_model(char const *path);
 void init_model(tmm_model*model, tmm_problem*prob, Parameter para);
 void tmm_destroy_model(tmm_model **model);
 void transform_R(short *halfR, float *floatR, tmm_problem *prob, Parameter para);
-tmm_float look_up_Rp(float **Rp, tmm_int u, tmm_int v, tmm_model *model);
-tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, float **Rp);
+tmm_float look_up_floatR(tmm_int u, tmm_int v, tmm_model *model, tmm_problem *prob);
+tmm_double calc_rmse(tmm_problem *prob, tmm_model *model);
 
 //------------------------------------------------------------Kernel Functions-----------------------------------------------
 
@@ -111,37 +111,43 @@ void transform_R(short *halfR, float *floatR, tmm_problem *prob, Parameter para)
 		int num_blocks = (prob->gridSizeM*prob->gridSizeN + 255) / 256;
 		if (num_blocks > 8 * 24)num_blocks = 8 * 24;
 
-		transform_half << <num_blocks, 256 >> >(gpu_half_R gpu_float_R, prob->gridSizeM*prob->gridSizeN);
+		transform_half <<<num_blocks, 256 >>>(gpu_half_R, gpu_float_R, prob->gridSizeM*prob->gridSizeN);
 
 		gpuErr(cudaPeekAtLastError());
-		cudaMemcpy(float_feature + i*prob->gridSizeM*prob->gridSizeN, gpu_float_R, sizeof(float)*prob->gridSizeM*prob->gridSizeN, cudaMemcpyDeviceToHost);
+		cudaMemcpy(floatR + i*prob->gridSizeM*prob->gridSizeN, gpu_float_R, sizeof(float)*prob->gridSizeM*prob->gridSizeN, cudaMemcpyDeviceToHost);
 		gpuErr(cudaPeekAtLastError());
 	}
 
-	cudaFree(gpu_half_feature);
-	cudaFree(gpu_float_feature);
+	cudaFree(gpu_half_R);
+	cudaFree(gpu_float_R);
 	gpuErr(cudaPeekAtLastError());
 }
 
 //--------------------------core---------------------------------------
 
-void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float **Rp)
+void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob)
 {   using half_float::half;
     printf("calling tmm_update_k128()...\n");
+	printf("gridSizeM: %d\n", model->gridSizeM);
+	printf("gridSizeN: %d\n", model->gridSizeN);
 
+	printf("k: %d\n", model->k);
     //malloc
-    cudaMalloc(&model->gpuHalfp, sizeof(half)*model->gridSizeM*model->k);
-    cudaMalloc(&model->gpuHalfq, sizeof(half)*model->gridSizeN*model->k);
-	cudaMalloc(&prob->gpuR, sizeof(half)*model->gridSizeM*model->gridSizeN);
-    //checkCudaErrors("Error allocating device memory arrays");	
+    cudaMalloc(reinterpret_cast<void**>(&model->gpuHalfp), sizeof(half)*model->gridSizeM*model->k);
+    cudaMalloc(reinterpret_cast<void**>(&model->gpuHalfq), sizeof(half)*model->gridSizeN*model->k);
+	cudaMalloc(reinterpret_cast<void**>(&prob->gpuR), sizeof(half)*model->gridSizeM*model->gridSizeN);
+	
+	//gpuErr(cudaPeekAtLastError());
+
 	for (int rowTile = 0; rowTile < para.rowScale; rowTile++)
 	{
-		for (int colTile = 0; colTile< para.colScale; colTile++)
+		for (int colTile = 0; colTile < para.colScale; colTile++)
 		{
 			short *p_tmp = model->halfp + model->gridSizeM*model->k*rowTile;
             short *q_tmp = model->halfq + model->gridSizeN*model->k*colTile;
 			assert(p_tmp);
 			assert(q_tmp); 
+			
 			// Copy from CPU to GMEM
 			cudaMemcpy(model->gpuHalfp, p_tmp, sizeof(half)*model->gridSizeM*model->k, cudaMemcpyHostToDevice);
             cudaMemcpy(model->gpuHalfq, q_tmp, sizeof(half)*model->gridSizeN*model->k, cudaMemcpyHostToDevice);
@@ -149,26 +155,16 @@ void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob, float 
 			// Dim Configuration
             dim3 block(32, 32);
 			dim3 grid((model->gridSizeN+block.x-1)/block.x, (model->gridSizeM+block.y-1)/block.y);
+			// Kernel
 			tmm_kernel<<<grid,block>>>(para, model->gridSizeM, model->gridSizeN, model->k, model->gpuHalfp, model->gpuHalfq, prob->gpuR);
+			
 			// Copy from GMEM to CPU
 			short *R_tmp = prob->halfR + model->gridSizeM*model->gridSizeN*(para.colScale*rowTile+colTile);
-			//shortR = malloc(sizeof(short)*model->gridSizeM*model->gridSizeN);
-			cudaMemcpy(R_tmp, prob->gpuR, sizeof(half)*model->gridSizeM*model->gridSizeN, cudaMemcpyDeviceToHost);
-			//checkCudaErrors("Unable to retrieve result from device");
-			// printf("load a R partition and update\n");
-	  //       long long idx = 0;
-	  //       int partNum = 2 * rowTile + colTile;
-	  //       for (long long i = 0; i < model->gridSizeM; i++){
-		 //        for (long long j = 0; j < model->gridSizeN; j++){
-			//         Rp[partNum][idx] = (float)(shortR[idx]);
-			//         idx++;
-		 //        }
-   //          }
-
+			cudaMemcpy(R_tmp, prob->gpuR, (long long)(sizeof(half))*model->gridSizeM*model->gridSizeN , cudaMemcpyDeviceToHost);
 		}
 	}
     cudaDeviceSynchronize();
-    transform_R(prob->halfR, prob->floatR, prob, para);
+    //transform_R(prob->halfR, prob->floatR, prob, para);
     cudaFree(model->gpuHalfp);
     cudaFree(model->gpuHalfq);
 	cudaFree(prob->gpuR);
@@ -226,7 +222,7 @@ tmm_problem read_problem(string path)  //load matrix R(m n nnz R)
 	prob.R = R;
 
 	fclose(fptr);
-	printf("m:%lld, n:%lld, nnz:%lld\n", prob.m, prob.n, prob.nnz);
+	printf("m:%lld, n:%lld, nnz:%lld\n\n", prob.m, prob.n, prob.nnz);
 	return prob;
 }
 //-----------------------------------------------------------------
@@ -234,7 +230,7 @@ void grid_problem(tmm_problem* prob, Parameter para) //grid matrix R(gridSizeM, 
 {
 	clock_t start;
 
-	printf("grid problem ...\n");
+	printf("grid problem ...\n\n\n");
 	fflush(stdout);
 
 	//grid the problem into several grids
@@ -246,68 +242,8 @@ void grid_problem(tmm_problem* prob, Parameter para) //grid matrix R(gridSizeM, 
 	prob->gridSizeM = u_seg;
 	prob->gridSizeN = v_seg;
 
-    cudaMallocHost(&prob->halfR, sizeof(short)*prob->m*prob->n);
-    cudaMallocHost(&prob->floatR, sizeof(float)*prob->m*prob->n);
-	// auto get_grid_id = [=](int u, int v)   // allocate each node of R into the 4 grids
-	// {
-	// 	return ((u / u_seg) * 2 + v / v_seg);     //return the grid ID
-	// };
-
-	// //count the size of each grid
-	// long long *gridSize = new long long[para.rowScale*para.colScale]();
-
-	// start = clock();
-
-	// for (long long i = 0; i < prob->nnz; i++)
-	// {
-	// 	int tmp_u = prob->R[i].u;
-	// 	int tmp_v = prob->R[i].v;
-	// 	gridSize[get_grid_id(tmp_u, tmp_v)] ++;
-	// }
-	// prob->gridSize = gridSize;
-
-	// //get max of grid size
-	// long long max_grid_size = 0;
-	// for (int i = 0; i < para.rowScale*para.colScale; i++)
-	// {
-	// 	//printf("gridSize[%d]:%lld\n",i,prob->gridSize[i]);
-	// 	if (max_grid_size < gridSize[i])max_grid_size = gridSize[i];
-	// }
-	// prob->maxGridSize = max_grid_size;
-
-	// //generate the pointer to each grid.
-	// tmm_node**R2D = new tmm_node*[para.rowScale*para.colScale + 1];
-	// tmm_node* R = prob->R;
-	// R2D[0] = R;
-	// for (int grid = 0; grid < para.rowScale*para.colScale; grid++)R2D[grid + 1] = R2D[grid] + gridSize[grid];
-
-	// prob->R2D = R2D;
-
-	// //swap
-	// printf("swapping ...\n");
-	// start = clock();
-	// tmm_node**pivots = new tmm_node*[4];
-	// for (int i = 0; i < 4; i++)pivots[i] = R2D[i];
-
-	// for (int grid = 0; grid < 4; grid++)
-	// {
-	// 	for (tmm_node*pivot = pivots[grid]; pivot != R2D[grid + 1];)
-	// 	{
-	// 		int corre_grid = get_grid_id(pivot->u, pivot->v);
-	// 		if (corre_grid == grid)
-	// 		{
-	// 			pivot++;
-	// 			continue;
-	// 		}
-	// 		tmm_node *next = pivots[corre_grid];
-	// 		swap(*pivot, *next);
-	// 		pivots[corre_grid] ++;
-	// 	}
-	// }
-
-	// printf("grid swap time:%.8lfs\n", (clock() - start) / (double)CLOCKS_PER_SEC);
-	// printf("\n\n");
-	// fflush(stdout);
+	prob->halfR = (short*)malloc((long long)(sizeof(short)) * prob->m * prob->n);
+    prob->floatR = (short*)malloc((long long)(sizeof(float)) * prob->m * prob->n);
 }
 
 //-------------------------------------------
@@ -390,17 +326,10 @@ void init_model(tmm_model*model, tmm_problem*prob, Parameter para)//malloc(gridS
     model->gridSizeN = prob->gridSizeN;
 
     //allocate memory
-    // cudaMallocHost(&model->floatp, sizeof(float)*para.rowScale*model->gridSizeM*model->k);
-    // cudaMallocHost(&model->floatq, sizeof(float)*para.colScale*model->gridSizeN*model->k);
-
-    cudaMallocHost(&model->halfp, sizeof(short)*para.rowScale*model->gridSizeM*model->k);
-    cudaMallocHost(&model->halfq, sizeof(short)*para.colScale*model->gridSizeN*model->k);
-
-    gpuErr(cudaPeekAtLastError());
-
-    //random init
-    // init_feature(model->halfp, model->ux, model->u_seg, model->k);
-    // init_feature(model->halfq, model->vy, model->v_seg, model->k);
+    cudaMallocHost(&model->halfp, sizeof(short)*model->m*model->k);
+    cudaMallocHost(&model->halfq, sizeof(short)*model->n*model->k);
+	cudaMemcpy(model->halfp, model->P, sizeof(short)*model->m*model->k, cudaMemcpyHostToHost);
+	cudaMemcpy(model->halfq, model->Q, sizeof(short)*model->n*model->k, cudaMemcpyHostToHost);
 
     printf("time elapsed:%.8lfs\n",(clock() - start)/(double)CLOCKS_PER_SEC);
     printf("\n\n\n");
@@ -423,19 +352,19 @@ void tmm_destroy_model(tmm_model **model)
 }
 
 //-----------------------------------------------------------------
-tmm_float look_up_Rp(float **Rp, tmm_int u, tmm_int v, tmm_model *model)
+tmm_float look_up_floatR(tmm_int u, tmm_int v, tmm_model *model, tmm_problem *prob)
 {
 	int partx = u/model->gridSizeM;
 	int gridm = u%model->gridSizeM;
 	int party = v/model->gridSizeN;
 	int gridn = v%model->gridSizeN;
-	int partn = 2 * partx + party;
+	int partn = 256 * partx + party;
 	int id = gridm * model->gridSizeN + gridn;
-	return Rp[partn][id];
+	return prob->floatR[partn*model->gridSizeM*model->gridSizeN + id];
 
 }
 //-------------------------------------------------------
-tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, float **Rp)
+tmm_double calc_rmse(tmm_problem *prob, tmm_model *model)
 {
 	printf("calculating rmse ...\n");
 	if (prob->nnz == 0)
@@ -445,8 +374,8 @@ tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, float **Rp)
 	for (tmm_long i = 0; i < prob->nnz; i++)
 	{
 		tmm_node &N = prob->R[i];
-		N.rp = look_up_Rp(Rp, N.u, N.v, model);
-		tmm_float e = N.r - look_up_Rp(Rp, N.u, N.v, model);
+		N.rp = look_up_floatR(N.u, N.v, model, prob);
+		tmm_float e = N.r - look_up_floatR(N.u, N.v, model, prob);
 
 		loss += e*e;
 
@@ -466,14 +395,10 @@ void multiplication(string test_path, const char* model_path)
     init_model(model, &prob, para);
 
     //core
-    float **Rp;
-	//Rp = malloc(sizeof(float)*para.rowScale*para.colScale*model->gridSizeM*model->gridSizeN);
+    tmm_update_k128(para, model, &prob);
 
-    tmm_update_k128(para, model, &prob, Rp);
-
-	auto rmse = calc_rmse(&prob, model, Rp);
+	auto rmse = calc_rmse(&prob, model);
 	cout << fixed << setprecision(4) << "RMSE = " << rmse << endl;
-    
 
     tmm_destroy_model(&model);
 }
@@ -484,14 +409,8 @@ int main()
 {
 	string test_path = "C:/Users/wez078/lab3/Src/lab3/netflix_mme.bin";
 	const char* model_path = "C:/Users/wez078/lab3/Src/lab3/pqmodel_hf.bin";
-	//try
-    //{
-        multiplication(test_path, model_path);
-    //}
-    /*catch(runtime_error &e)
-    {
-        cout << e.what() << endl;
-        return 1;
-    }*/
+
+    multiplication(test_path, model_path);
+
     return 0;
 }
