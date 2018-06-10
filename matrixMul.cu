@@ -40,9 +40,9 @@ using namespace tmm;
 #endif
 
 //func declarations
-__global__ void tmm_kernel(Parameter para, tmm_int a_seg, tmm_int b_seg, tmm_int k, half *gpuHalfp, half *gpuHalfq, half *gpuR);
+__global__ void tmm_kernel(Parameter para, long long a_seg, long long b_seg, tmm_int k, half *gpuHalfp, half *gpuHalfq, half *gpuR);
 __global__ void transform_half(half *gpu_half_feature, float *gpu_float_feature, long long vec_size);
-void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob);
+tmm_double tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob);
 tmm_problem read_problem(string path);
 void grid_problem(tmm_problem* prob, Parameter para);
 tmm_model* tmm_load_model(char const *path);
@@ -50,36 +50,36 @@ void init_model(tmm_model*model, tmm_problem*prob, Parameter para);
 void tmm_destroy_model(tmm_model **model);
 void transform_R(short *halfR, float *floatR, tmm_problem *prob, Parameter para);
 tmm_float look_up_floatR(tmm_int u, tmm_int v, tmm_model *model, tmm_problem *prob);
-tmm_double calc_rmse(tmm_problem *prob, tmm_model *model);
+tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, int rn, int cn);
 
 //------------------------------------------------------------Kernel Functions-----------------------------------------------
 
 //-------------------------kernel----------------------------
-__global__ void tmm_kernel(Parameter para, tmm_int a_seg, tmm_int b_seg, tmm_int k, half *gpuHalfp, half *gpuHalfq, half *gpuR)
+__global__ void tmm_kernel(Parameter para, long long a_seg, long long b_seg, tmm_int k, half *gpuHalfp, half *gpuHalfq, half *gpuR)
 {
     //from GMEM to SMEM
     int bx = blockDim.x, by = blockDim.y;
     int tx = threadIdx.x, ty = threadIdx.y;
-    int I = blockIdx.y*by + ty, J = blockIdx.x*bx + tx; // row and col
+    int I = blockIdx.x*bx + tx, J = blockIdx.y*by + ty; // row and col
     int t = para.tile;
 	__shared__ half aTile[32][32];
 	__shared__ half bTile[32][32];
     float c = 0.0f;     
 	for (unsigned int k1=0; k1 < (k+t-1)/t; k1++)
 	{
-		if (I < a_seg && k1*t+tx < k){
-			aTile[ty][tx] = __ldg(&gpuHalfp[I*k + k1*t + tx]);
+		if (I < a_seg && k1*t+ty < k){
+			aTile[ty][tx] = __ldg(&gpuHalfp[I*k + k1*t + ty]);
 		}
-		if (J < b_seg && k1*t+ty < k){
-			bTile[ty][tx] = __ldg(&gpuHalfq[J*k + k1*t + ty]);
+		if (J < b_seg && k1*t+tx < k){
+			bTile[tx][ty] = __ldg(&gpuHalfq[J*k + k1*t + tx]);
 		}
 		__syncthreads(); // Synchronizes all threads in a block	
-		for (unsigned int k2=0; k2< t; k2++)
-            c += __half2float(aTile[ty][k2])*__half2float(bTile[k2][tx]);
+		for (unsigned int k2=0; k2< bx; k2++)
+            c += __half2float(aTile[tx][k2])*__half2float(bTile[ty][k2]);
         __syncthreads(); // Avoids memory hazards
 	}
 	if (I < a_seg && J < b_seg)
-        gpuR[I*a_seg + J] = __float2half(c);
+		gpuR[I*b_seg + J] = __float2half(10.0);// __float2half(c);
 }
 //--------------------------------------------------------------------
 __global__ void transform_half(half *gpu_half_feature, float *gpu_float_feature, long long vec_size)
@@ -101,31 +101,28 @@ void transform_R(short *halfR, float *floatR, tmm_problem *prob, Parameter para)
 
 	cudaMalloc(&gpu_half_R, sizeof(half)*prob->gridSizeM*prob->gridSizeN);
 	cudaMalloc(&gpu_float_R, sizeof(float)*prob->gridSizeM*prob->gridSizeN);
-	gpuErr(cudaPeekAtLastError());
+	//gpuErr(cudaPeekAtLastError());
 
-	for (int i = 0; i < para.rowScale*para.colScale; i++)
-	{
-		cudaMemcpy(gpu_half_R, halfR + i*prob->gridSizeM*prob->gridSizeN, sizeof(half)*prob->gridSizeM*prob->gridSizeN, cudaMemcpyHostToDevice);
-		gpuErr(cudaPeekAtLastError());
+	cudaMemcpy(gpu_half_R, halfR, sizeof(half)*prob->gridSizeM*prob->gridSizeN, cudaMemcpyHostToDevice);
+	//gpuErr(cudaPeekAtLastError());
 
-		int num_blocks = (prob->gridSizeM*prob->gridSizeN + 255) / 256;
-		if (num_blocks > 8 * 24)num_blocks = 8 * 24;
+	int num_blocks = (prob->gridSizeM*prob->gridSizeN + 255) / 256;
+	if (num_blocks > 8 * 24)num_blocks = 8 * 24;
 
-		transform_half <<<num_blocks, 256 >>>(gpu_half_R, gpu_float_R, prob->gridSizeM*prob->gridSizeN);
+	transform_half <<<num_blocks, 256 >>>(gpu_half_R, gpu_float_R, prob->gridSizeM*prob->gridSizeN);
 
-		gpuErr(cudaPeekAtLastError());
-		cudaMemcpy(floatR + i*prob->gridSizeM*prob->gridSizeN, gpu_float_R, sizeof(float)*prob->gridSizeM*prob->gridSizeN, cudaMemcpyDeviceToHost);
-		gpuErr(cudaPeekAtLastError());
-	}
+	//gpuErr(cudaPeekAtLastError());
+	cudaMemcpy(floatR, gpu_float_R, sizeof(float)*prob->gridSizeM*prob->gridSizeN, cudaMemcpyDeviceToHost);
+	//gpuErr(cudaPeekAtLastError());
 
 	cudaFree(gpu_half_R);
 	cudaFree(gpu_float_R);
-	gpuErr(cudaPeekAtLastError());
+	//gpuErr(cudaPeekAtLastError());
 }
 
 //--------------------------core---------------------------------------
 
-void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob)
+tmm_double tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob)
 {   using half_float::half;
     printf("calling tmm_update_k128()...\n");
 	printf("gridSizeM: %d\n", model->gridSizeM);
@@ -138,7 +135,7 @@ void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob)
 	cudaMalloc(reinterpret_cast<void**>(&prob->gpuR), sizeof(half)*model->gridSizeM*model->gridSizeN);
 	
 	//gpuErr(cudaPeekAtLastError());
-
+	tmm_double loss = 0;
 	for (int rowTile = 0; rowTile < para.rowScale; rowTile++)
 	{
 		for (int colTile = 0; colTile < para.colScale; colTile++)
@@ -159,15 +156,19 @@ void tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob)
 			tmm_kernel<<<grid,block>>>(para, model->gridSizeM, model->gridSizeN, model->k, model->gpuHalfp, model->gpuHalfq, prob->gpuR);
 			
 			// Copy from GMEM to CPU
-			short *R_tmp = prob->halfR + model->gridSizeM*model->gridSizeN*(para.colScale*rowTile+colTile);
-			cudaMemcpy(R_tmp, prob->gpuR, (long long)(sizeof(half))*model->gridSizeM*model->gridSizeN , cudaMemcpyDeviceToHost);
+			//short *R_tmp = prob->halfR + model->gridSizeM*model->gridSizeN*(para.colScale*rowTile+colTile);
+			cudaMemcpy(prob->halfR, prob->gpuR, (long long)(sizeof(half))*model->gridSizeM*model->gridSizeN , cudaMemcpyDeviceToHost);
+            transform_R(prob->halfR, prob->floatR, prob, para);
+			printf("calculating rmse ...\n");
+			loss += calc_rmse(prob, model, rowTile, colTile);
 		}
 	}
     cudaDeviceSynchronize();
-    //transform_R(prob->halfR, prob->floatR, prob, para);
+
     cudaFree(model->gpuHalfp);
     cudaFree(model->gpuHalfq);
 	cudaFree(prob->gpuR);
+	return sqrt(loss / prob->nnz);
 }
 //------------------------------------------------------------Host Functions-------------------------------------------------
 //----------------------------------------------------------
@@ -242,8 +243,8 @@ void grid_problem(tmm_problem* prob, Parameter para) //grid matrix R(gridSizeM, 
 	prob->gridSizeM = u_seg;
 	prob->gridSizeN = v_seg;
 
-	prob->halfR = (short*)malloc((long long)(sizeof(short)) * prob->m * prob->n);
-    prob->floatR = (short*)malloc((long long)(sizeof(float)) * prob->m * prob->n);
+	prob->halfR = (short*)malloc((long long)(sizeof(short)) * prob->gridSizeM * prob->gridSizeN);
+    prob->floatR = (float*)malloc((long long)(sizeof(float)) * prob->gridSizeM * prob->gridSizeN);
 }
 
 //-------------------------------------------
@@ -326,11 +327,16 @@ void init_model(tmm_model*model, tmm_problem*prob, Parameter para)//malloc(gridS
     model->gridSizeN = prob->gridSizeN;
 
     //allocate memory
-    cudaMallocHost(&model->halfp, sizeof(short)*model->m*model->k);
-    cudaMallocHost(&model->halfq, sizeof(short)*model->n*model->k);
+    cudaMallocHost(&model->halfp, sizeof(short)*model->gridSizeM*para.rowScale*model->k);
+    cudaMallocHost(&model->halfq, sizeof(short)*model->gridSizeN*para.colScale*model->k);
 	cudaMemcpy(model->halfp, model->P, sizeof(short)*model->m*model->k, cudaMemcpyHostToHost);
 	cudaMemcpy(model->halfq, model->Q, sizeof(short)*model->n*model->k, cudaMemcpyHostToHost);
-
+	for (long long i = model->m; i < model->gridSizeM*para.rowScale; i++) {
+		model->halfp[i] = 0;
+	}
+	for (long long i = model->n; i < model->gridSizeN*para.colScale; i++) {
+		model->halfq[i] = 0;
+	}
     printf("time elapsed:%.8lfs\n",(clock() - start)/(double)CLOCKS_PER_SEC);
     printf("\n\n\n");
 }
@@ -354,34 +360,33 @@ void tmm_destroy_model(tmm_model **model)
 //-----------------------------------------------------------------
 tmm_float look_up_floatR(tmm_int u, tmm_int v, tmm_model *model, tmm_problem *prob)
 {
-	int partx = u/model->gridSizeM;
 	int gridm = u%model->gridSizeM;
-	int party = v/model->gridSizeN;
 	int gridn = v%model->gridSizeN;
-	int partn = 256 * partx + party;
 	int id = gridm * model->gridSizeN + gridn;
-	return prob->floatR[partn*model->gridSizeM*model->gridSizeN + id];
+	return prob->halfR[id];
 
 }
 //-------------------------------------------------------
-tmm_double calc_rmse(tmm_problem *prob, tmm_model *model)
+tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, int rn, int cn)
 {
-	printf("calculating rmse ...\n");
+
 	if (prob->nnz == 0)
 		return 0;
 	tmm_double loss = 0;
 
 	for (tmm_long i = 0; i < prob->nnz; i++)
-	{
+	{   
 		tmm_node &N = prob->R[i];
-		N.rp = look_up_floatR(N.u, N.v, model, prob);
-		tmm_float e = N.r - look_up_floatR(N.u, N.v, model, prob);
 
-		loss += e*e;
+		if ( (model->gridSizeM*rn <= N.u) && (N.u < model->gridSizeM*(rn+1)) && (model->gridSizeN*cn <= N.v) && (N.v < model->gridSizeN*(cn + 1)) ){			
+		    N.rp = look_up_floatR(N.u, N.v, model, prob);
+		    tmm_float e = N.r - look_up_floatR(N.u, N.v, model, prob);
+		    loss += e*e;
+		}
 
-		if (i % 100000000 == 0 && i > 0)printf("progress: %%%.3lf, est_RMSE: %.4lf\n", ((double)100.0)*i / prob->nnz, sqrt(loss / (i + 1)));
+		if (i % 100000000 == 0 && i > 0)printf("progress: %%%.3lf, est_RMSE: %.4lf\n", ((double)100.0)*i / prob->nnz, sqrt(loss / (i + 1))); else return 60000;
 	}
-	return sqrt(loss / prob->nnz);
+	return loss;
 }
 //----------------multiplication-----------------------------
 void multiplication(string test_path, const char* model_path)
@@ -395,9 +400,8 @@ void multiplication(string test_path, const char* model_path)
     init_model(model, &prob, para);
 
     //core
-    tmm_update_k128(para, model, &prob);
+	auto rmse = tmm_update_k128(para, model, &prob);
 
-	auto rmse = calc_rmse(&prob, model);
 	cout << fixed << setprecision(4) << "RMSE = " << rmse << endl;
 
     tmm_destroy_model(&model);
