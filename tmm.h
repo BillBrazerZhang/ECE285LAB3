@@ -41,7 +41,7 @@ namespace tmm
     int tile;
 	int rowScale;
 	int colScale;
-    Parameter():tile(32), rowScale(10), colScale(2){}
+    Parameter():tile(32), rowScale(64), colScale(4){}
     };
 
 	struct tmm_node

@@ -65,21 +65,23 @@ __global__ void tmm_kernel(Parameter para, long long a_seg, long long b_seg, tmm
 	__shared__ half aTile[32][32];
 	__shared__ half bTile[32][32];
     float c = 0.0f;     
-	for (unsigned int k1=0; k1 < (k+t-1)/t; k1++)
+	for (unsigned int k1=0; k1 < k/t+1; k1++)
 	{
 		if (I < a_seg && k1*t+ty < k){
-			aTile[ty][tx] = __ldg(&gpuHalfp[I*k + k1*t + ty]);
+			aTile[tx][ty] = __ldg(&gpuHalfp[I*k + k1*t + ty]);
 		}
+		else aTile[tx][ty] = __float2half(0.0);
 		if (J < b_seg && k1*t+tx < k){
 			bTile[tx][ty] = __ldg(&gpuHalfq[J*k + k1*t + tx]);
 		}
+		else bTile[tx][ty] = __float2half(0.0);
 		__syncthreads(); // Synchronizes all threads in a block	
 		for (unsigned int k2=0; k2< bx; k2++)
-            c += __half2float(aTile[tx][k2])*__half2float(bTile[ty][k2]);
+            c += __half2float(aTile[tx][k2])*__half2float(bTile[k2][ty]);
         __syncthreads(); // Avoids memory hazards
 	}
 	if (I < a_seg && J < b_seg)
-		gpuR[I*b_seg + J] = __float2half(10.0);// __float2half(c);
+		gpuR[I*b_seg + J] = __float2half(c);// __float2half(c);
 }
 //--------------------------------------------------------------------
 __global__ void transform_half(half *gpu_half_feature, float *gpu_float_feature, long long vec_size)
@@ -151,15 +153,14 @@ tmm_double tmm_update_k128(Parameter para, tmm_model *model, tmm_problem *prob)
 			
 			// Dim Configuration
             dim3 block(32, 32);
-			dim3 grid((model->gridSizeN+block.x-1)/block.x, (model->gridSizeM+block.y-1)/block.y);
+			dim3 grid((model->gridSizeM+block.x-1)/block.x, (model->gridSizeN+block.y-1)/block.y);
 			// Kernel
-			tmm_kernel<<<grid,block>>>(para, model->gridSizeM, model->gridSizeN, model->k, model->gpuHalfp, model->gpuHalfq, prob->gpuR);
-			
+			tmm_kernel<<<grid, block>>>(para, model->gridSizeM, model->gridSizeN, model->k, model->gpuHalfp, model->gpuHalfq, prob->gpuR);
 			// Copy from GMEM to CPU
 			//short *R_tmp = prob->halfR + model->gridSizeM*model->gridSizeN*(para.colScale*rowTile+colTile);
 			cudaMemcpy(prob->halfR, prob->gpuR, (long long)(sizeof(half))*model->gridSizeM*model->gridSizeN , cudaMemcpyDeviceToHost);
             transform_R(prob->halfR, prob->floatR, prob, para);
-			printf("calculating rmse ...\n");
+			printf("calculating rmse ... gridx: %d, gridy: %d\n", rowTile, colTile);
 			loss += calc_rmse(prob, model, rowTile, colTile);
 		}
 	}
@@ -235,7 +236,6 @@ void grid_problem(tmm_problem* prob, Parameter para) //grid matrix R(gridSizeM, 
 	fflush(stdout);
 
 	//grid the problem into several grids
-	//In our homework, ux = vy = 2, u_seg = m/2, v_seg = n/2
 	long long u_seg, v_seg;
 	u_seg = (long long)ceil((double)prob->m / para.rowScale);
 	v_seg = (long long)ceil((double)prob->n / para.colScale);
@@ -363,7 +363,7 @@ tmm_float look_up_floatR(tmm_int u, tmm_int v, tmm_model *model, tmm_problem *pr
 	int gridm = u%model->gridSizeM;
 	int gridn = v%model->gridSizeN;
 	int id = gridm * model->gridSizeN + gridn;
-	return prob->halfR[id];
+	return prob->floatR[id];
 
 }
 //-------------------------------------------------------
@@ -380,11 +380,12 @@ tmm_double calc_rmse(tmm_problem *prob, tmm_model *model, int rn, int cn)
 
 		if ( (model->gridSizeM*rn <= N.u) && (N.u < model->gridSizeM*(rn+1)) && (model->gridSizeN*cn <= N.v) && (N.v < model->gridSizeN*(cn + 1)) ){			
 		    N.rp = look_up_floatR(N.u, N.v, model, prob);
+			//printf("rp=%f\n", N.rp);
 		    tmm_float e = N.r - look_up_floatR(N.u, N.v, model, prob);
 		    loss += e*e;
 		}
 
-		if (i % 100000000 == 0 && i > 0)printf("progress: %%%.3lf, est_RMSE: %.4lf\n", ((double)100.0)*i / prob->nnz, sqrt(loss / (i + 1))); else return 60000;
+		if (i % 100000000 == 0 && i > 0)printf("progress: %%%.3lf, est_RMSE: %.4lf\n", ((double)100.0)*i / prob->nnz, sqrt(loss / (i + 1))); 
 	}
 	return loss;
 }
